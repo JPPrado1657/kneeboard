@@ -1,15 +1,18 @@
 let state, selected = '', selectedRepository = '', signature = '', ended = false;
 const SYSTEM = 'system';
 const clientId = crypto.randomUUID();
-let diagramSignature = '', diagramFrames = [];
+let diagramSignature = '', diagramFrames = [], previewEvidence = null, previewOpener = null, previewScroll = null;
 window.addEventListener('message', event => {
   const entry = diagramFrames.find(item => item.frame.contentWindow === event.source);
   if (!entry || !event.data || typeof event.data !== 'object') return;
   if (event.data.type === 'kneeboard-diagram-ready') {
-    entry.frame.contentWindow.postMessage({type:'kneeboard-diagram-render', format:entry.diagram.format, source:entry.diagram.source}, '*');
+    entry.frame.contentWindow.postMessage({type:'kneeboard-diagram-render', format:entry.diagram.format, source:entry.diagram.source, expanded:entry.expanded}, '*');
   } else if (event.data.type === 'kneeboard-diagram-size') {
     const height = Number(event.data.height);
+    if (entry.expanded) return;
     if (Number.isFinite(height)) entry.frame.height = Math.max(160, Math.min(660, height));
+  } else if (event.data.type === 'kneeboard-diagram-expand' && !entry.expanded) {
+    openDiagram(entry.diagram);
   } else if (event.data.type === 'kneeboard-diagram-rendered') {
     entry.status.textContent = 'Rendered locally';
   } else if (event.data.type === 'kneeboard-diagram-error') {
@@ -42,39 +45,121 @@ function switchView(id) {
   $('error').textContent = '';
   render();
 }
+function focusEvidence(container, evidence) {
+  const attribute = evidence.side === 'old' ? 'old-line' : 'new-line';
+  const line = Array.from(container.querySelectorAll(`[data-${attribute}]`))
+    .find(node => Number(node.dataset[evidence.side === 'old' ? 'oldLine' : 'newLine']) === evidence.line);
+  if (line) {
+    line.classList.add('focus');
+    line.scrollIntoView({block:'center', inline:'nearest'});
+  }
+}
 function jump(evidence) {
   if (evidence.repositoryId) selectedRepository = evidence.repositoryId;
   selected = evidence.path;
   $('search').value = '';
   $('priority').value = '';
   render();
-  const attribute = evidence.side === 'old' ? 'old-line' : 'new-line';
-  const line = document.querySelector(`[data-${attribute}="${evidence.line}"]`);
-  if (line) {
-    line.classList.add('focus');
-    line.scrollIntoView({behavior:'smooth', block:'center'});
+  focusEvidence($('diffs'), evidence);
+}
+function cleanupPreview() {
+  previewEvidence = null;
+  diagramFrames = diagramFrames.filter(entry => !entry.expanded);
+  $('previewContent').replaceChildren();
+  $('previewActions').replaceChildren();
+  document.body.classList.remove('preview-open');
+  if (previewOpener) {
+    (previewOpener.isConnected ? previewOpener : $('search')).focus({preventScroll:true});
+    previewOpener = null;
+  }
+  if (previewScroll) { window.scrollTo(...previewScroll); previewScroll = null; }
+}
+function closePreview() {
+  if ($('preview').open) { $('preview').close(); cleanupPreview(); }
+}
+function preparePreview(title) {
+  closePreview();
+  previewEvidence = null;
+  diagramFrames = diagramFrames.filter(entry => !entry.expanded);
+  previewOpener = document.activeElement;
+  previewScroll = [window.scrollX, window.scrollY];
+  $('previewTitle').textContent = title;
+  $('previewContent').replaceChildren();
+  $('previewActions').replaceChildren();
+}
+function showPreview() {
+  document.body.classList.add('preview-open');
+  $('preview').showModal();
+}
+function updateCodePreview() {
+  const evidence = previewEvidence;
+  const repo = state?.repositories.find(item => item.id === evidence.repositoryId);
+  const file = repo?.snapshot.files.find(item => item.path === evidence.path);
+  $('previewTitle').textContent = (repo ? repositoryLabel(repo) : 'Repository unavailable') + ' / ' + evidence.path;
+  $('previewContent').replaceChildren(file ? renderDiff(file) : el('p', 'empty', 'This file is no longer available in the current snapshot.'));
+  $('previewActions').replaceChildren();
+  if (file) {
+    const button = el('button', '', 'Open repository changes');
+    button.onclick = () => { closePreview(); jump(evidence); };
+    $('previewActions').append(button);
+    focusEvidence($('previewContent'), evidence);
   }
 }
+function openCodePreview(evidence) {
+  preparePreview('Code preview');
+  previewEvidence = evidence;
+  showPreview();
+  updateCodePreview();
+}
+function openDiagram(diagram) {
+  preparePreview(diagram.title || 'Change map');
+  $('previewContent').append(renderDiagram(diagram, false, true));
+  showPreview();
+}
+$('closePreview').onclick = closePreview;
+$('preview').addEventListener('click', event => {
+  const rect = $('preview').getBoundingClientRect();
+  if (event.target === $('preview') && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) closePreview();
+});
+$('preview').addEventListener('close', () => { if (!$('preview').open) cleanupPreview(); });
 function evidenceButtons(container, evidence, system) {
+  const group = el('div', 'evidence-group');
+  container.append(group);
   for (const entry of evidence) {
     const repo = state.repositories.find(item => item.id === entry.repositoryId);
     const prefix = system && repo ? repositoryLabel(repo) + ' / ' : '';
     const button = el('button', 'evidence', `${prefix}${entry.path}:${entry.line} (${entry.side}) ↗\n${entry.quote}`);
-    button.onclick = () => jump(entry);
-    container.append(button);
+    button.onclick = () => system ? openCodePreview(entry) : jump(entry);
+    group.append(button);
   }
 }
-function renderDiagram(diagram, system) {
+function renderDiagram(diagram, system, expanded = false) {
   const panel = el('div', 'panel diagram');
   const format = diagram.format || 'graph';
   if (system) panel.append(el('h3', '', diagram.title));
-  if (format === 'graph') {
-    for (const node of diagram.nodes || []) panel.append(el('span', 'node', node));
-    for (const [from, to] of diagram.edges || []) panel.append(el('div', 'edge', from + ' → ' + to));
-    return panel;
-  }
   const toolbar = el('div', 'diagram-toolbar');
   toolbar.append(el('span', 'badge', format === 'drawio' ? 'DRAW.IO' : format.toUpperCase()));
+  if (!expanded) {
+    const expand = el('button', '', 'Expand diagram');
+    expand.onclick = () => openDiagram(diagram);
+    toolbar.append(expand);
+  }
+  panel.append(toolbar);
+  if (format === 'graph') {
+    const graph = el('div', 'graph-preview');
+    if (!expanded) graph.onclick = () => openDiagram(diagram);
+    panel.append(graph);
+    let scale = 1;
+    if (expanded) for (const [label, delta] of [['−', -.25], ['+', .25], ['Fit', 0]]) {
+      const button = el('button', '', label);
+      button.setAttribute('aria-label', label === 'Fit' ? 'Fit diagram' : 'Zoom ' + (delta > 0 ? 'in' : 'out') + ' diagram');
+      button.onclick = () => { scale = delta ? Math.max(.5, Math.min(4, scale + delta)) : 1; graph.style.zoom = scale; };
+      toolbar.append(button);
+    }
+    for (const node of diagram.nodes || []) graph.append(el('span', 'node', node));
+    for (const [from, to] of diagram.edges || []) graph.append(el('div', 'edge', from + ' → ' + to));
+    return panel;
+  }
   const frame = el('iframe', 'diagram-frame');
   frame.title = (diagram.title || 'Change map') + ' (' + format + ')';
   frame.setAttribute('sandbox', 'allow-scripts');
@@ -87,7 +172,7 @@ function renderDiagram(diagram, system) {
     toolbar.append(button);
   }
   const status = el('small', 'diagram-status', 'Loading local renderer…');
-  diagramFrames.push({frame, diagram, status});
+  diagramFrames.push({frame, diagram, status, expanded});
   const details = el('details', 'diagram-source');
   details.append(el('summary', '', 'View ' + (format === 'drawio' ? 'draw.io XML' : format) + ' source'), el('pre', '', diagram.source));
   panel.append(toolbar, frame, status, details);
@@ -96,7 +181,7 @@ function renderDiagram(diagram, system) {
 function renderDiagrams(diagrams, system) {
   const nextSignature = JSON.stringify([selectedRepository, diagrams]);
   if (nextSignature === diagramSignature) return;
-  diagramSignature = nextSignature; diagramFrames = [];
+  diagramSignature = nextSignature; diagramFrames = diagramFrames.filter(entry => entry.expanded);
   $('diagram').replaceChildren();
   for (const diagram of diagrams) $('diagram').append(renderDiagram(diagram, system));
   if (!diagrams.length) $('diagram').append(el('div', 'empty', system
@@ -215,7 +300,7 @@ async function load() {
   try {
     const next = await api('state'), nextSignature = JSON.stringify(next);
     if (ended) return;
-    if (nextSignature !== signature) { state = next; signature = nextSignature; render(); }
+    if (nextSignature !== signature) { state = next; signature = nextSignature; render(); if (previewEvidence) updateCodePreview(); }
   } catch (error) { if (!ended) $('error').textContent = error.message; }
 }
 $('repository').onchange = () => switchView($('repository').value);
@@ -233,7 +318,7 @@ $('refresh').onclick = async () => {
 };
 $('close').onclick = async () => {
   try {
-    await api('close', {}); ended = true; clearInterval(poll); state = null; signature = ''; diagramFrames = []; diagramSignature = '';
+    await api('close', {}); closePreview(); ended = true; clearInterval(poll); state = null; signature = ''; diagramFrames = []; diagramSignature = '';
     document.body.replaceChildren(el('p', '', 'Session ended. Review data has been removed from the running application.'));
   } catch (error) { $('error').textContent = error.message; }
 };

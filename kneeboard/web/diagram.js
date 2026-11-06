@@ -1,5 +1,5 @@
 // Diagram content runs in an opaque-origin sandbox, separate from the report.
-let initialized = false, zoom = 1, viewer;
+let initialized = false, zoom = 1, viewer, expanded = false;
 const drawing = document.getElementById('drawing');
 const message = document.getElementById('message');
 function notify(type, extra = {}) { parent.postMessage({type, ...extra}, '*'); }
@@ -54,6 +54,8 @@ window.addEventListener('message', async event => {
   const data = event.data;
   if (data.type === 'kneeboard-diagram-render' && !initialized) {
     initialized = true;
+    expanded = Boolean(data.expanded);
+    document.body.classList.toggle('expanded', expanded);
     try { await render(data.format,data.source); }
     catch (error) {
       drawing.replaceChildren(); message.textContent = error.message;
@@ -73,3 +75,5 @@ window.addEventListener('message', async event => {
 });
 window.addEventListener('resize', size);
 notify('kneeboard-diagram-ready');
+
+drawing.addEventListener('click', () => { if (!expanded) notify('kneeboard-diagram-expand'); });
