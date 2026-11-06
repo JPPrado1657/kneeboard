@@ -10,27 +10,70 @@ A temporary, local review workspace for people writing code with AI. Git supplie
 
 Requires **Python 3.10+**, **Git**, and a modern browser. No Python runtime dependencies, API key, cloud service, or Node.js build is required.
 
-Download or clone this project, then run these commands inside its folder:
+Clone the project and run the setup script:
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install .
+git clone https://github.com/JPPrado1657/kneeboard.git
+cd kneeboard
+python3 scripts/setup.py
+```
+
+On Windows, use `py -3 scripts/setup.py` instead. The script creates `.venv`, installs Kneeboard, checks that the CLI runs, and installs both `kneeboard` and `kneeboard-update` skills into `${CODEX_HOME:-~/.codex}/skills`. It prints a launch command for your installation. Setup may download Python build dependencies, so an internet connection is required for a fresh installation.
+
+Start a new AI session to load the skills. Other coding assistants can use the same files when they support `SKILL.md`. The CLI and repository must be accessible in the assistant's execution environment; a remote assistant cannot access a server running only on your laptop.
+
+You can rerun setup after a failed installation. It reuses its virtual environment and reinstalls the app and bundled skills. Bundled skill files are replaced; keep personal customizations outside those folders. The script does not change your shell configuration or require administrator privileges.
+
+Optional setup choices:
+
+```sh
+# Choose another assistant's skills directory.
+python3 scripts/setup.py --skills-dir /path/to/skills
+
+# Install the app without installing AI skills.
+python3 scripts/setup.py --skip-skills
+
+# Choose a different virtual environment location.
+python3 scripts/setup.py --venv /path/to/kneeboard-env
+```
+
+### Run from any terminal
+
+Activate the installed environment before using `kneeboard`:
+
+```sh
+source /absolute/path/to/kneeboard/.venv/bin/activate
 kneeboard --help
 ```
 
-On Windows, activate with `.venv\Scripts\Activate.ps1` in PowerShell instead. If you open a new terminal, activate the environment again before using `kneeboard`. For developers, use `python -m pip install -e .` so source changes take effect immediately.
+On Windows, activate with `.venv\Scripts\Activate.ps1` in PowerShell. Activate again in each new terminal, or use the full Python launch command printed by setup to avoid activation. For developers, activate the environment and use `python -m pip install -e .` so source changes take effect immediately.
 
-### Install the AI skill
+## Update with your AI assistant
 
-For Codex, copy the bundled skill into your personal skills directory:
+The setup script installs the update skill automatically. To add it manually to an older installation:
 
 ```sh
-mkdir -p ~/.codex/skills/kneeboard
-cp skills/kneeboard/SKILL.md ~/.codex/skills/kneeboard/SKILL.md
+mkdir -p ~/.codex/skills/kneeboard-update
+cp -R skills/kneeboard-update/. ~/.codex/skills/kneeboard-update/
 ```
 
-If you customized `CODEX_HOME`, use its `skills/kneeboard` directory instead. Start a new AI session after installing. Other coding assistants can use the same instructions when their skill format supports `SKILL.md`, or read the file directly. The CLI must be available in the assistant's execution environment; a remote assistant cannot access a server running only on your laptop.
+Existing users whose checkout predates this skill should first run `git pull --ff-only` in their Kneeboard project folder. Use your custom `CODEX_HOME` path instead of `~/.codex` if configured. Start a new AI session after copying the skill, then ask:
+
+> Use the kneeboard-update skill to update my Kneeboard installation and both skills.
+
+The assistant finds your checkout and installed Python environment. The update script fetches the official repository, fast-forwards a clean `main` checkout, reinstalls the application, and refreshes both bundled skills. It stops for local changes, a different origin, or local-only commits. It does not reset or stash your work. Bundled files in the two installed skill folders are replaced; keep any personal skill customizations elsewhere.
+
+Updates follow the latest `main` commit, even if the package version number has not changed. Restart Kneeboard after updating and start a new AI session to load updated skills. Existing review sessions continue using the previously loaded code. If installation fails after Git updates, resolve the error and rerun; the updater retries installation even when the source is already current.
+
+To run the updater yourself:
+
+```sh
+python3 skills/kneeboard-update/scripts/update.py \
+  --repo "$PWD" \
+  --python "$PWD/.venv/bin/python"
+```
+
+Run this from the Kneeboard checkout. On Windows use `.venv/Scripts/python.exe` for `--python`. Use `--skills-dir` to choose another assistant's skill directory. No background update service or persistent review history is added.
 
 ## Run a review
 
