@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-kneeboard"
+version = "0.1.0"
+description = "Ephemeral, evidence-backed local code review reports for AI coding assistants"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+kneeboard = "kneeboard.app:main"
+
+[tool.setuptools.package-data]
+kneeboard = ["web/*"]
+
+[tool.setuptools.packages.find]
+include = ["kneeboard*"]
