@@ -68,7 +68,7 @@ def setup(repo, environment, skills_dir=None):
         command = shlex.join([str(python), '-m', 'kneeboard.app', 'serve', '/path/to/your/repository'])
     print('  ' + command)
     if skills_dir is not None:
-        print('Start a new AI session to load the skills. Ask it to use kneeboard or kneeboard-update.')
+        print('Start a new AI session to load the skills. Use Connect AI in the running report to attach your assistant.')
     return python
 
 

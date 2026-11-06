@@ -24,8 +24,14 @@
         <span id="repositoryPath"></span>
       </div>
       <span id="repo">Base</span><span class="pill">PRIVATE · LOCAL</span>
-      <button id="refresh">Refresh snapshot</button><button id="close">End session</button>
+      <button id="connectAI">Connect AI</button><button id="refresh">Refresh snapshot</button><button id="close">End session</button>
     </header>
+    <section id="aiConnection" class="panel ai-connection" hidden>
+      <h2>Connect your AI to this session</h2>
+      <p>Copy this prompt into your coding assistant. It connects to this running review and leaves it open when finished.</p>
+      <textarea id="aiPrompt" aria-label="AI connection prompt" readonly rows="8"></textarea>
+      <button id="copyAiPrompt">Copy prompt</button><span id="copyStatus" role="status"></span>
+    </section>
     <section class="hero">
       <div class="eyebrow" id="scope">CHANGE INTELLIGENCE</div>
       <h1 id="title">A clearer view of your changes.</h1>

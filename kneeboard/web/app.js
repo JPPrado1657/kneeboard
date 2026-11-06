@@ -1,5 +1,6 @@
 let state, selected = '', selectedRepository = '', signature = '', ended = false;
 const SYSTEM = 'system';
+const clientId = crypto.randomUUID();
 let diagramSignature = '', diagramFrames = [];
 window.addEventListener('message', event => {
   const entry = diagramFrames.find(item => item.frame.contentWindow === event.source);
@@ -236,8 +237,31 @@ $('close').onclick = async () => {
     document.body.replaceChildren(el('p', '', 'Session ended. Review data has been removed from the running application.'));
   } catch (error) { $('error').textContent = error.message; }
 };
+function heartbeat() { return api('heartbeat', {clientId}).catch(() => {}); }
 window.addEventListener('pagehide', () => {
-  if (!ended) navigator.sendBeacon('close', new Blob(['{}'], {type:'application/json'}));
+  if (!ended) navigator.sendBeacon('disconnect', new Blob([JSON.stringify({clientId})], {type:'application/json'}));
 });
-const poll = setInterval(() => { api('heartbeat', {}).catch(() => {}); load(); }, 4000);
-load();
+window.addEventListener('pageshow', heartbeat);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !ended) { heartbeat(); load(); } });
+$('connectAI').onclick = () => {
+  if (!state) return;
+  const panel = $('aiConnection'); panel.hidden = !panel.hidden;
+  if (panel.hidden) return;
+  const quote = text => "'" + text.replaceAll("'", "'\"'\"'") + "'";
+  const command = state.connection.command.map(quote).join(' ');
+  const url = new URL('.', location.href).href;
+  $('aiPrompt').value = `Use the kneeboard skill to enrich the EXISTING review session at ${url}
+Do not start a replacement server, reload or close the report tab, call /close, or stop the server.
+Connect with: ${command} connect ${quote(url)}
+Keep the returned leaseId. Read the returned state, inspect all listed repositories, and submit a separate report for each repository with submit --repo <id>.
+Also submit the system overview with submit --overview using the complete overview.snapshotIds mapping. Include meaningful behavior descriptions and diagrams supported by the code; do not invent findings or evidence.
+Verify via GET ${url}state that each intended repository report and the system overview are stored before declaring success. Report submission errors instead of claiming completion.
+When done, release only your AI lease with: ${command} finish ${quote(url)} --lease <leaseId>
+Leave the session open for me to review.`;
+};
+$('copyAiPrompt').onclick = async () => {
+  try { await navigator.clipboard.writeText($('aiPrompt').value); $('copyStatus').textContent = 'Prompt copied'; }
+  catch { $('aiPrompt').focus(); $('aiPrompt').select(); $('copyStatus').textContent = 'Select and copy the prompt above'; }
+};
+const poll = setInterval(() => { heartbeat(); load(); }, 4000);
+heartbeat(); load();

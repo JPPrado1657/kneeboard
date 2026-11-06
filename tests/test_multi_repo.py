@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 
@@ -211,6 +212,82 @@ class MultiRepositoryTests(unittest.TestCase):
                                 input=json.dumps(report), text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.session.overview_report, report)
+
+    def test_temporary_tab_disconnect_and_reload_preserve_reports(self):
+        self.session.submit_overview(self.overview())
+        with patch('kneeboard.app.time.monotonic', return_value=100):
+            self.session.heartbeat('user-tab')
+            self.session.heartbeat('agent-inspection-tab')
+            self.session.disconnect('agent-inspection-tab')
+        self.assertFalse(self.session.expired(120, now=110))
+        with patch('kneeboard.app.time.monotonic', return_value=110):
+            self.session.disconnect('user-tab')
+        self.assertFalse(self.session.expired(120, now=139))
+        with patch('kneeboard.app.time.monotonic', return_value=135):
+            self.session.heartbeat('reloaded-tab')
+        self.assertFalse(self.session.expired(120, now=141))
+        self.assertIsNotNone(self.session.overview_report)
+        self.assertTrue(self.session.expired(120, now=256))
+
+    def test_review_lease_protects_background_analysis_and_eventually_expires(self):
+        with patch('kneeboard.app.time.monotonic', return_value=100):
+            self.session.last_seen = 100
+            self.session.heartbeat('tab')
+            lease = self.session.start_review()
+            self.session.disconnect('tab')
+        self.assertFalse(self.session.expired(120, now=230))
+        with patch('kneeboard.app.time.monotonic', return_value=1000):
+            self.assertEqual(self.session.start_review(lease), lease)
+        self.assertFalse(self.session.expired(120, now=2000))
+        self.assertTrue(self.session.expired(120, now=2801))
+        self.assertEqual(self.session.review_leases, {})
+
+    def test_finished_review_allows_background_browser_to_resume(self):
+        with patch('kneeboard.app.time.monotonic', return_value=100):
+            self.session.heartbeat('background-tab')
+            lease = self.session.start_review()
+        self.assertFalse(self.session.expired(120, now=300))
+        with patch('kneeboard.app.time.monotonic', return_value=310):
+            self.session.finish_review(lease)
+        self.assertFalse(self.session.expired(120, now=320))
+        with patch('kneeboard.app.time.monotonic', return_value=325):
+            self.session.heartbeat('background-tab')
+        self.assertFalse(self.session.expired(120, now=440))
+
+    def test_agent_connect_enrich_verify_and_finish_leave_user_session_open(self):
+        url = self.start_server()
+        self.request(url, 'heartbeat', {'clientId':'user-tab'})
+        command = [sys.executable, '-m', 'kneeboard.app']
+        def cli(*args, payload=None):
+            result = subprocess.run(command + list(args), input=None if payload is None else json.dumps(payload),
+                                    text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        connection = cli('connect', url)
+        lease = connection['leaseId']
+        self.assertEqual(len(connection['state']['repositories']), 2)
+        self.assertEqual(connection['state']['connection']['activeReviews'], 1)
+        for repo in connection['state']['repositories']:
+            cli('submit', url, '--repo', repo['id'], payload=self.report(repo, 'Delivered'))
+        cli('submit', url, '--overview', payload=self.overview())
+        verified = cli('connect', url, '--lease', lease)['state']
+        self.assertTrue(all(repo['report']['title'] == 'Delivered' for repo in verified['repositories']))
+        self.assertEqual(verified['overview']['report']['title'], 'System review')
+        cli('finish', url, '--lease', lease)
+        self.assertEqual(self.request(url)['connection']['activeReviews'], 0)
+        self.assertIsNotNone(self.request(url)['overview']['report'])
+        self.assertFalse(self.session.expired(120))
+
+    def test_submit_cli_explains_validation_errors_without_closing_session(self):
+        url = self.start_server()
+        report = self.report(self.session.repositories[0])
+        report['findings'][0]['evidence'][0]['quote'] = 'wrong quote'
+        result = subprocess.run([sys.executable, '-m', 'kneeboard.app', 'submit', url],
+                                input=json.dumps(report), text=True, capture_output=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('exact quote do not match', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertEqual(len(self.request(url)['repositories']), 2)
 
     def test_clear_releases_all_repository_review_data(self):
         references = list(self.session.repositories)

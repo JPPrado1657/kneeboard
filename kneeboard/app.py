@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -21,6 +22,8 @@ class LocalServer(ThreadingHTTPServer):
 
 
 LIMIT = 1_000_000
+DISCONNECT_GRACE = 30
+REVIEW_LEASE_SECONDS = 1800
 
 def git(repo, *args):
     p = subprocess.run(['git', '-C', str(repo), *args], stdout=subprocess.PIPE,
@@ -198,7 +201,53 @@ class Session:
         self.overview_report = None
         self.token = secrets.token_urlsafe(32)
         self.last_seen = time.monotonic()
+        self.clients = {}
+        self.review_leases = {}
+        self.disconnect_deadline = None
         self.lock = threading.RLock()
+
+    def heartbeat(self, client_id=None):
+        now = time.monotonic()
+        self.last_seen = now
+        self.disconnect_deadline = None
+        if client_id is not None:
+            if not isinstance(client_id, str) or not 1 <= len(client_id) <= 100:
+                raise ValueError('clientId must contain 1–100 characters')
+            self.clients[client_id] = now
+
+    def disconnect(self, client_id):
+        if not isinstance(client_id, str) or not client_id:
+            raise ValueError('clientId is required')
+        if client_id in self.clients:
+            del self.clients[client_id]
+            if not self.clients:
+                self.disconnect_deadline = time.monotonic() + DISCONNECT_GRACE
+
+    def start_review(self, lease_id=None):
+        if lease_id is None:
+            lease_id = secrets.token_urlsafe(24)
+        elif not isinstance(lease_id, str) or lease_id not in self.review_leases:
+            raise ValueError('Unknown review lease; connect without --lease to start a new review')
+        self.review_leases[lease_id] = time.monotonic() + REVIEW_LEASE_SECONDS
+        return lease_id
+
+    def finish_review(self, lease_id):
+        if not isinstance(lease_id, str) or not lease_id:
+            raise ValueError('leaseId is required')
+        if self.review_leases.pop(lease_id, None) is not None:
+            # Let a backgrounded report tab resume after the agent releases its lease.
+            # An explicitly disconnected last tab still follows its close deadline.
+            self.last_seen = time.monotonic()
+
+    def expired(self, idle_timeout, now=None):
+        now = time.monotonic() if now is None else now
+        self.clients = {key:seen for key, seen in self.clients.items() if now - seen < idle_timeout}
+        self.review_leases = {key:until for key, until in self.review_leases.items() if now < until}
+        if self.clients or self.review_leases:
+            return False
+        if self.disconnect_deadline is not None:
+            return now >= self.disconnect_deadline
+        return now - self.last_seen >= idle_timeout
 
     @property
     def snapshot(self):
@@ -218,7 +267,9 @@ class Session:
 
     def state(self):
         state = {'repositories': self.repositories,
-                 'overview': {'snapshotIds': self.snapshot_ids(), 'report': self.overview_report}}
+                 'overview': {'snapshotIds': self.snapshot_ids(), 'report': self.overview_report},
+                 'connection': {'command': [sys.executable, '-m', 'kneeboard.app'],
+                                'activeReviews': len(self.review_leases)}}
         # Preserve the original API for single-repository clients.
         if len(self.repositories) == 1:
             state.update(snapshot=self.snapshot, report=self.report)
@@ -259,6 +310,8 @@ class Session:
             repo['report'] = None
         self.repositories.clear()
         self.overview_report = None
+        self.clients.clear()
+        self.review_leases.clear()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -313,7 +366,23 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.rfile.read(size)
             with s.lock:
                 if route == 'heartbeat':
-                    s.last_seen = time.monotonic()
+                    data = json.loads(payload or b'{}')
+                    if not isinstance(data, dict):
+                        raise ValueError('Heartbeat body must be a JSON object')
+                    s.heartbeat(data.get('clientId'))
+                    return self.respond(200, {'ok': True})
+                if route in ('disconnect', 'review/start', 'review/finish'):
+                    data = json.loads(payload or b'{}')
+                    if not isinstance(data, dict):
+                        raise ValueError('Body must be a JSON object')
+                    if route == 'disconnect':
+                        s.disconnect(data.get('clientId'))
+                    elif route == 'review/start':
+                        lease = s.start_review(data.get('leaseId'))
+                        return self.respond(200, {'leaseId': lease, 'expiresInSeconds': REVIEW_LEASE_SECONDS,
+                                                  'state': s.state()})
+                    else:
+                        s.finish_review(data.get('leaseId'))
                     return self.respond(200, {'ok': True})
                 if route == 'close':
                     self.respond(200, {'ok': True})
@@ -362,26 +431,44 @@ def main():
     target = submit.add_mutually_exclusive_group()
     target.add_argument('--overview', action='store_true', help='Submit a system overview covering every repository')
     target.add_argument('--repo', help='Repository ID from state.repositories; required for multi-repository sessions unless supplied in JSON')
+    connect = sub.add_parser('connect', help='Attach an AI review to an existing session without opening or closing tabs')
+    connect.add_argument('url')
+    connect.add_argument('--lease', help='Renew an existing review lease')
+    finish = sub.add_parser('finish', help='Release an AI review lease; leave the browser session running')
+    finish.add_argument('url')
+    finish.add_argument('--lease', required=True)
     args = parser.parse_args()
-    if args.command == 'submit':
-        import sys
+    if args.command in ('submit', 'connect', 'finish'):
         url = args.url
         from urllib.parse import urlparse
         parsed = urlparse(url)
-        if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port:
+        if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port or parsed.query or parsed.fragment or parsed.username or parsed.password:
             parser.error('Use a loopback session URL')
-        payload = sys.stdin.buffer.read()
-        if args.repo:
-            report = json.loads(payload)
-            if not isinstance(report, dict):
-                parser.error('Report must be a JSON object')
-            if report.get('repositoryId', args.repo) != args.repo:
-                parser.error('--repo conflicts with repositoryId in report')
-            report['repositoryId'] = args.repo
-            payload = json.dumps(report).encode()
-        req = urllib.request.Request(url.rstrip('/') + ('/overview' if args.overview else '/report'), data=payload, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req) as response:
-            print(response.read().decode())
+        if args.command == 'submit':
+            payload = sys.stdin.buffer.read()
+            if args.repo:
+                try:
+                    report = json.loads(payload)
+                except ValueError as exc:
+                    parser.error(str(exc))
+                if not isinstance(report, dict):
+                    parser.error('Report must be a JSON object')
+                if report.get('repositoryId', args.repo) != args.repo:
+                    parser.error('--repo conflicts with repositoryId in report')
+                report['repositoryId'] = args.repo
+                payload = json.dumps(report).encode()
+            route = 'overview' if args.overview else 'report'
+        else:
+            payload = json.dumps({'leaseId': args.lease}).encode()
+            route = 'review/start' if args.command == 'connect' else 'review/finish'
+        req = urllib.request.Request(url.rstrip('/') + '/' + route, data=payload, headers={'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                print(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            parser.exit(1, 'Session rejected the request: ' + exc.read().decode(errors='replace') + '\n')
+        except (urllib.error.URLError, TimeoutError) as exc:
+            parser.exit(1, 'Could not reach the running session: ' + str(exc) + '\n')
         return
     if args.idle_timeout < 30:
         parser.error('--idle-timeout must be at least 30 seconds')
@@ -393,10 +480,15 @@ def main():
     server.session = session
     url = f'http://127.0.0.1:{server.server_port}/{session.token}/'
     print(url, flush=True)
+    print("Click Connect AI in the report to attach your assistant to this session.", flush=True)
     def expire():
-        while time.monotonic() - session.last_seen < args.idle_timeout:
+        while True:
+            with session.lock:
+                expired = session.expired(args.idle_timeout)
+            if expired:
+                server.shutdown()
+                return
             time.sleep(2)
-        server.shutdown()
     threading.Thread(target=expire, daemon=True).start()
     if not args.no_open:
         webbrowser.open(url)
