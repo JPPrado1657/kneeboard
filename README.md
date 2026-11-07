@@ -1,6 +1,6 @@
 # Kneeboard
 
-A temporary, local review workspace for people writing code with AI. Git supplies the actual changes; your AI supplies technical explanations and findings; a reusable HTML/JavaScript interface presents both consistently.
+A persistent, local review workspace for people writing code with AI. Git supplies the actual changes; your AI supplies technical explanations and findings; a reusable HTML/JavaScript interface presents both consistently.
 
 ![Kneeboard system overview spanning the API and web repositories](docs/system-overview.jpg)
 
@@ -113,6 +113,9 @@ Or tell your AI which repositories belong to the project:
 
 Use the **Review view** selector at the top of the report to choose **System overview** or an individual repository. A multi-repository session opens on the system view. Select a repository to inspect its local changes. In a repository view, the selected repository controls the file list, diffs, findings, counts, summary, and change map. Switching clears the file selection, search, and priority filter so a filter from one repository cannot hide another repository's changes. Reports remain available when you switch back, and incoming AI updates do not change your selection.
 
+Code boxes include old/new line numbers, added/removed counts, and a toolbar for **Unified** or **Split** diffs, **Wrap lines**, and text size. **Expand** opens a larger code preview. Display preferences are remembered in your browser across reloads; they do not modify saved snapshots or reviews. The interface uses graphite surfaces with blue accents and green/red change markers.
+
+
 The path below the selector identifies the checkout. If repositories share the same directory name, the selector shows their full paths to distinguish them. The same Git root cannot be listed twice, including through a subdirectory or symlink.
 
 ![Kneeboard with the API repository selected](docs/multi-repo-api.jpg)
@@ -123,7 +126,7 @@ The path below the selector identifies the checkout. If repositories share the s
 
 *The same live session after switching to web: its files, findings, change map, and summary replace the API review.*
 
-**Refresh snapshot** refreshes the selected repository, clears its report, and invalidates the system overview. Other repository reports remain available. Edits in another repository do not invalidate submissions for the selected one. All repositories share the session's temporary lifecycle; ending the session releases every repository's review data. Add or remove repositories by ending the session and starting it again with the desired paths.
+**Refresh snapshot** refreshes the selected repository, clears its report, and invalidates the system overview. Other repository reports remain available. Edits in another repository do not invalidate submissions for the selected one. Snapshots and reports are saved locally; reopening the same repository set and base restores them, even after code or interface changes. Add or remove repositories by ending the session and starting it again with the desired paths.
 
 `--base` applies to every listed repository, so use a ref that exists in all of them. The default `HEAD` compares each repository against its own current commit. Each repository must have an initial commit; an invalid repository stops startup with an error instead of silently omitting it.
 
@@ -138,7 +141,7 @@ Some changes only make sense across the whole project. **System overview** is a 
 
 The AI submits this report independently of repository reviews. It can have a system summary and diagrams even when no repository-specific report is ready. Each behavior and finding needs code evidence; diagram relationships and behavioral reasoning remain AI explanations rather than verified static analysis.
 
-The report records the snapshot ID for every repository. Refreshing any repository invalidates the overview so it can be regenerated against current snapshots. **Refresh all snapshots** in System overview recaptures every repository and clears all repository reports and the system report. Switching views alone keeps the reports intact. System data stays in memory and is released with the rest of the session.
+The report records the snapshot ID for every repository. Refreshing any repository invalidates the overview so it can be regenerated against current snapshots. **Refresh all snapshots** in System overview recaptures every repository and clears all repository reports and the system report. Switching views alone keeps the reports intact. System data is saved locally with the repository reports.
 
 <details>
 <summary>Mobile layout</summary>
@@ -167,7 +170,7 @@ kneeboard serve /absolute/path/to/repo --no-open
 
 Open its printed URL on the same computer. After editing code, click **Refresh snapshot**, then ask the AI to review the new snapshot. Refresh discards the previous AI report for the selected repository. Submissions are rejected if the repository changed since capture.
 
-Click **End session** or press **Ctrl+C** in the server terminal to finish immediately. Closing all report tabs releases the session after the reconnection grace and any active AI lease end. Start a new server for the next review.
+Click **End session** or press **Ctrl+C** in the server terminal to finish immediately. Closing all report tabs releases the session after the reconnection grace and any active AI lease end. Start a new server with the same repositories and base to restore the saved review. Use **Refresh all snapshots** to recapture changes and clear all reports.
 
 ## Features
 
@@ -213,19 +216,19 @@ This goes in `diagrams` for a system report, or in `diagram` for a repository re
 
 *Both formats rendered in the running local report from AI-style source data.*
 
-SVG is a [W3C web standard](https://www.w3.org/TR/SVG2/), and Mermaid and draw.io also render vector graphics. The distinction is the authoring format: Mermaid describes a diagram in text, draw.io uses its diagram XML, and raw SVG describes the drawing itself. Kneeboard keeps the submitted source in memory; it does not require saving diagram files.
+SVG is a [W3C web standard](https://www.w3.org/TR/SVG2/), and Mermaid and draw.io also render vector graphics. The distinction is the authoring format: Mermaid describes a diagram in text, draw.io uses its diagram XML, and raw SVG describes the drawing itself. Kneeboard saves submitted diagram source with the review; it does not require separate diagram files.
 
 No CDN, hosted editor, API key, or Node.js installation is needed to view diagrams. Renderer bundles and their licenses are included in the Python package. Rendering happens in a sandbox separate from the report; its content security policy blocks network connections and external images. Mermaid runs in strict mode with source configuration overrides disabled. draw.io supports uncompressed XML and built-in shapes; external stencil packs, image assets, MathJax, and hosted integrations are unavailable. A diagram that fails to parse shows an error in its panel while the rest of the report stays usable.
 
-Pinned bundle versions, checksums, upstream sources, and licenses are documented in [the vendor notes](kneeboard/web/vendor/README.md). Their installed code stays on disk like the rest of the application; submitted diagram source and rendered review data follow the temporary session lifecycle below.
+Pinned bundle versions, checksums, upstream sources, and licenses are documented in [the vendor notes](kneeboard/web/vendor/README.md). Their installed code stays on disk like the rest of the application; submitted diagram source and review data follow the saved-data lifecycle below.
 
-## Temporary data lifecycle
+## Saved data lifecycle
 
-The server holds snapshots and reports in process memory. It does not write them to the repository, temporary files, a database, or browser storage. Responses use `Cache-Control: no-store`. Each report tab sends a heartbeat every four seconds. Leaving a tab disconnects that tab, not the entire session. When the last known tab leaves, the server allows **30 seconds** for a reload or reconnection before exiting. Other live tabs or an active AI review lease keep the session alive. If the browser crashes and no disconnect arrives, the server exits after **120 seconds** without a browser heartbeat, provided no AI lease remains. Configure that fallback with `--idle-timeout 300` (minimum 30 seconds).
+The server automatically saves snapshots, repository reports, system overviews, and diagram sources to `~/.local/share/kneeboard/`. Set `KNEEBOARD_STATE_DIR` to use another directory. Files are private to your user and replaced atomically after each accepted report or refresh. Saved sessions are identified by the resolved repository paths and requested base; repository order does not matter. Reopening that same set restores the captured data without recapturing changed code. **Refresh all snapshots** replaces the saved snapshots and clears all reports. A single-repository refresh clears that repository report and the system overview. A different repository set or base has its own saved state. Saved data stays outside the reviewed repositories and browser storage. Responses use `Cache-Control: no-store`. Each report tab sends a heartbeat every four seconds. Leaving a tab disconnects that tab, not the entire session. When the last known tab leaves, the server allows **30 seconds** for a reload or reconnection before exiting. Other live tabs or an active AI review lease keep the session alive. If the browser crashes and no disconnect arrives, the server exits after **120 seconds** without a browser heartbeat, provided no AI lease remains. Configure that fallback with `--idle-timeout 300` (minimum 30 seconds).
 
-**Reloading preserves the session when the page reconnects within 30 seconds.** Multiple report tabs share the same session; closing one does not close the others. An AI acquires a temporary, renewable **30-minute review lease** with `kneeboard connect` and releases it with `kneeboard finish`. This protects analysis while the browser is backgrounded. Releasing the AI lease gives an otherwise-idle browser tab the normal idle window to resume; explicitly closing the last tab still follows its disconnect grace. If the AI crashes, the lease eventually expires; it creates no files or persistent registry. Browser background throttling or computer suspension can still cause expiration after all live-tab and AI protections expire. **End session** and Ctrl+C stop the server regardless of active leases.
+**Reloading reconnects to the running server within 30 seconds; restarting the server restores the saved review.** Multiple report tabs share the same session; closing one does not close the others. An AI acquires a temporary, renewable **30-minute review lease** with `kneeboard connect` and releases it with `kneeboard finish`. This protects analysis while the browser is backgrounded. Releasing the AI lease gives an otherwise-idle browser tab the normal idle window to resume; explicitly closing the last tab still follows its disconnect grace. If the AI crashes, the lease eventually expires; it creates no files or persistent registry. Browser background throttling or computer suspension can still cause expiration after all live-tab and AI protections expire. **End session** and Ctrl+C stop the server regardless of active leases.
 
-On server shutdown, the application releases its review state and exits. This is not secure memory erasure and does not control operating-system swap, browser crash recovery, AI chat history, terminal scrollback, or files you explicitly save yourself. The installed program, source repository, and installed skill remain on disk.
+On server shutdown, the application releases its in-memory state and exits; the saved review remains available for reopening. Server tokens, browser clients, and AI leases are never saved and are recreated on startup. The new server prints a new session URL. Existing reviews from an older, memory-only server must be resubmitted after upgrading because that server has no saved copy.
 
 ## AI integration contract
 
@@ -244,7 +247,7 @@ All routes are relative to the printed session URL:
 | `POST disconnect` | Release one browser client by `clientId`; allow reconnection without ending other tabs or AI reviews. |
 | `POST review/start` | Acquire or renew a temporary AI lease; return its `leaseId`, expiry duration, and current state. |
 | `POST review/finish` | Release only the specified AI lease by `leaseId`. |
-| `POST close` | Stop the server and release all repositories' review data. |
+| `POST close` | Stop the server; preserve saved snapshots and reports for reopening. |
 
 The assistant attaches to a running session before analysis:
 
@@ -284,7 +287,7 @@ To submit the system report, use `kneeboard submit <session-url> --overview` wit
 - Binary files, files or diffs above 1 MB, and symlink target contents are excluded from textual review and labeled in the UI.
 - The collector does not execute repository code, hooks, external diff commands, or text conversion drivers. Tests only run when your assistant explicitly runs them.
 - This version reviews a working tree against a commit. It does not provide commit browsing, inline editing, Git staging, automatic fixes, submodule-internal diffs, or a native desktop installer.
-- Review data and a repository-wide context index are never persisted by this tool. The assistant can independently inspect repository context using its existing tools.
+- Review data is saved locally outside the repository. A repository-wide context index is not persisted by this tool. The assistant can independently inspect repository context using its existing tools.
 - The initial snapshot is read sequentially. Avoid editing while collecting; submission checks the collected fingerprint again. A repository changing continuously can require another refresh.
 
 ## Development and checks
@@ -293,6 +296,7 @@ To submit the system report, use `kneeboard submit <session-url> --overview` wit
 python3 -m unittest discover -s tests -v
 node --check kneeboard/web/app.js
 node --check kneeboard/web/diagram.js
+node tests/test_code_view.js
 ```
 
-Tests create isolated temporary Git repositories and check staged/untracked/deleted files, binary and symlink exclusions, evidence rejection, stale submissions, HTTP access, refresh, shutdown, and isolation between repositories with identical names and file paths, system-overview evidence and invalidation, and multi-repository CLI startup. Setup and updater tests check installation safeguards and preservation of local work. The integration test requires permission to bind a local loopback port. Node.js is optional and used only for the JavaScript syntax check.
+Tests create isolated temporary Git repositories and check staged/untracked/deleted files, binary and symlink exclusions, evidence rejection, stale submissions, HTTP access, refresh, shutdown, and isolation between repositories with identical names and file paths, system-overview evidence and invalidation, and multi-repository CLI startup. Setup and updater tests check installation safeguards and preservation of local work. The integration test requires permission to bind a local loopback port. Node.js is optional and runs the JavaScript syntax checks and code-view tests for line mapping, split alignment, and safe code rendering.

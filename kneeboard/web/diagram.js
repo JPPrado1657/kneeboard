@@ -17,6 +17,7 @@ async function render(format, source) {
   if (format === 'mermaid') {
     await loadScript('vendor/mermaid.min.js');
     mermaid.initialize({startOnLoad:false, securityLevel:'strict', theme:'dark',
+      themeVariables:{background:'#161b22', primaryColor:'#142b44', primaryTextColor:'#e6edf3', primaryBorderColor:'#388bfd', lineColor:'#8b9bb0', secondaryColor:'#1c2430', tertiaryColor:'#121922', mainBkg:'#142b44', nodeBorder:'#365675', clusterBkg:'#121922', clusterBorder:'#30363d', edgeLabelBackground:'#161b22'},
       fontFamily:'Arial, sans-serif', flowchart:{htmlLabels:false}, maxTextSize:100000, maxEdges:300,
       suppressErrorRendering:true});
     const {svg} = await mermaid.render('kneeboard-mermaid', source);

@@ -96,7 +96,7 @@ function updateCodePreview() {
   const repo = state?.repositories.find(item => item.id === evidence.repositoryId);
   const file = repo?.snapshot.files.find(item => item.path === evidence.path);
   $('previewTitle').textContent = (repo ? repositoryLabel(repo) : 'Repository unavailable') + ' / ' + evidence.path;
-  $('previewContent').replaceChildren(file ? renderDiff(file) : el('p', 'empty', 'This file is no longer available in the current snapshot.'));
+  $('previewContent').replaceChildren(file ? renderDiff(file, true) : el('p', 'empty', 'This file is no longer available in the current snapshot.'));
   $('previewActions').replaceChildren();
   if (file) {
     const button = el('button', '', 'Open repository changes');
@@ -188,26 +188,140 @@ function renderDiagrams(diagrams, system) {
     ? 'Your AI can supply architecture, request-flow, and behavior diagrams spanning the project.'
     : 'Your AI can supply a change map with labeled components and connections.'));
 }
-function renderDiff(file) {
-  const box = el('article', 'diff');
-  box.append(el('h3', '', file.path + ' · ' + file.status));
-  const code = el('div', 'code');
-  let old = 0, now = 0;
-  for (const line of (file.omitted || file.diff || 'No textual diff available').split('\n')) {
-    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)/);
-    if (hunk) { old = +hunk[1]; now = +hunk[2]; }
-    const header = line.startsWith('--- ') || line.startsWith('+++ ');
-    const node = el('div', 'line' + (hunk ? ' hunk' : !header && line.startsWith('+') ? ' add' : !header && line.startsWith('-') ? ' del' : ''), line);
-    if (!hunk && !header) {
-      if (line.startsWith('+')) node.dataset.newLine = now++;
-      else if (line.startsWith('-')) node.dataset.oldLine = old++;
-      else if (line.startsWith(' ')) { node.dataset.newLine = now++; node.dataset.oldLine = old++; }
+// Only display preferences go into browser storage; captured code stays server-side.
+const codePreferences = {view:'unified', wrap:false, size:13};
+try {
+  const saved = JSON.parse(localStorage.getItem('kneeboard.codeView') || 'null');
+  if (saved && ['unified','split'].includes(saved.view)) codePreferences.view = saved.view;
+  if (typeof saved?.wrap === 'boolean') codePreferences.wrap = saved.wrap;
+  if (Number.isInteger(saved?.size)) codePreferences.size = Math.max(11, Math.min(18, saved.size));
+} catch (_) { /* Storage may be unavailable in private browser sessions. */ }
+function diffLines(file) {
+  let old = 0, now = 0, inHunk = false;
+  return (file.omitted || file.diff || 'No textual diff available').split('\n').map(text => {
+    const hunk = text.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)/);
+    if (hunk) { old = +hunk[1]; now = +hunk[2]; inHunk = true; }
+    const row = {text, kind:hunk ? 'hunk' : 'meta', old:null, now:null};
+    if (!hunk && inHunk) {
+      if (text.startsWith('+')) { row.kind = 'add'; row.now = now++; }
+      else if (text.startsWith('-')) { row.kind = 'del'; row.old = old++; }
+      else if (text.startsWith(' ')) { row.kind = 'context'; row.old = old++; row.now = now++; }
     }
-    code.append(node);
+    return row;
+  });
+}
+function codeLine(row, side) {
+  const node = el('div', 'line ' + row.kind);
+  if (row.old !== null && side !== 'new') node.dataset.oldLine = row.old;
+  if (row.now !== null && side !== 'old') node.dataset.newLine = row.now;
+  for (const number of side ? [side === 'old' ? row.old : row.now] : [row.old, row.now]) {
+    const gutter = el('span', 'line-number', number === null ? '' : String(number));
+    gutter.setAttribute('aria-hidden', 'true'); node.append(gutter);
   }
-  box.append(code);
+  const isCode = ['add','del','context'].includes(row.kind);
+  const marker = el('span', 'line-marker', row.kind === 'add' ? '+' : row.kind === 'del' ? '−' : '');
+  marker.setAttribute('aria-hidden', 'true');
+  node.append(marker, el('span', 'line-text', isCode ? row.text.slice(1) : row.text));
+  return node;
+}
+function paintCode(code, rows) {
+  const scroll = [code.scrollLeft, code.scrollTop];
+  const focused = code.querySelector('.focus');
+  const evidence = focused ? {side:focused.dataset.newLine ? 'new' : 'old', line:Number(focused.dataset.newLine || focused.dataset.oldLine)} : null;
+  code.className = 'code ' + codePreferences.view + (codePreferences.wrap ? ' wrap' : '');
+  code.style.fontSize = codePreferences.size + 'px';
+  const content = document.createDocumentFragment();
+  const hasHunks = rows.some(row => row.kind === 'hunk');
+  if (codePreferences.view === 'unified') {
+    for (const row of rows) if (row.kind !== 'meta' || !hasHunks) content.append(codeLine(row));
+  } else {
+    const heading = el('div', 'split-head');
+    heading.append(el('span', '', 'BEFORE'), el('span', '', 'AFTER')); content.append(heading);
+    const pair = (left, right) => {
+      const node = el('div', 'split-row');
+      node.append(left ? codeLine(left, 'old') : el('div', 'line split-empty'), right ? codeLine(right, 'new') : el('div', 'line split-empty'));
+      content.append(node);
+    };
+    for (let index = 0; index < rows.length;) {
+      const row = rows[index];
+      if (row.kind === 'del' || row.kind === 'add') {
+        const removed = [], added = [];
+        while (index < rows.length && rows[index].kind === 'del') removed.push(rows[index++]);
+        while (index < rows.length && rows[index].kind === 'add') added.push(rows[index++]);
+        for (let i = 0; i < Math.max(removed.length, added.length); i++) pair(removed[i], added[i]);
+      } else {
+        if (row.kind === 'context') pair(row, row);
+        else if (row.kind !== 'meta' || !hasHunks) content.append(codeLine(row));
+        index++;
+      }
+    }
+  }
+  code.replaceChildren(content);
+  if (evidence) {
+    const attribute = evidence.side === 'new' ? 'newLine' : 'oldLine';
+    Array.from(code.querySelectorAll('.line')).find(node => Number(node.dataset[attribute]) === evidence.line)?.classList.add('focus');
+  }
+  code.scrollLeft = scroll[0]; code.scrollTop = scroll[1];
+}
+const codeViews = new WeakMap();
+function changeCodePreferences(change) {
+  Object.assign(codePreferences, change);
+  try { localStorage.setItem('kneeboard.codeView', JSON.stringify(codePreferences)); } catch (_) {}
+  for (const box of document.querySelectorAll('.diff')) codeViews.get(box)?.();
+}
+function renderDiff(file, expanded = false) {
+  const box = el('article', 'diff');
+  const rows = diffLines(file);
+  const header = el('div', 'diff-header');
+  header.append(el('h3', '', file.path), el('span', 'file-status', file.status));
+  const toolbar = el('div', 'code-toolbar');
+  toolbar.setAttribute('role', 'group'); toolbar.setAttribute('aria-label', 'Code view for ' + file.path);
+  const options = el('div', 'code-options'), toggle = el('div', 'view-toggle');
+  const buttons = [];
+  for (const [view, label] of [['unified','Unified'], ['split','Split']]) {
+    const button = el('button', '', label);
+    button.onclick = () => changeCodePreferences({view});
+    buttons.push([button, view]); toggle.append(button);
+  }
+  const wrap = el('button', '', 'Wrap lines');
+  wrap.onclick = () => changeCodePreferences({wrap:!codePreferences.wrap});
+  const smaller = el('button', 'code-size', 'A−'), larger = el('button', 'code-size', 'A+');
+  smaller.setAttribute('aria-label', 'Decrease code font size'); larger.setAttribute('aria-label', 'Increase code font size');
+  smaller.onclick = () => changeCodePreferences({size:Math.max(11, codePreferences.size - 1)});
+  larger.onclick = () => changeCodePreferences({size:Math.min(18, codePreferences.size + 1)});
+  const size = el('span', 'code-size-label');
+  options.append(toggle, wrap, smaller, size, larger);
+  const summary = el('span', 'diff-summary');
+  summary.append(el('span', 'added', '+' + rows.filter(row => row.kind === 'add').length), el('span', 'removed', '−' + rows.filter(row => row.kind === 'del').length));
+  summary.setAttribute('aria-label', rows.filter(row => row.kind === 'add').length + ' added lines, ' + rows.filter(row => row.kind === 'del').length + ' removed lines');
+  const actions = el('div', 'code-options'); actions.append(summary);
+  if (!expanded) {
+    const expand = el('button', '', 'Expand ↗');
+    expand.setAttribute('aria-label', 'Expand code in ' + file.path);
+    expand.onclick = () => {
+      const repo = state.repositories.find(repo => repo.snapshot.files.includes(file));
+      if (repo) {
+        const row = rows.find(row => row.now !== null) || rows.find(row => row.old !== null);
+        openCodePreview({repositoryId:repo.id, path:file.path, side:row?.now != null ? 'new' : 'old', line:row?.now ?? row?.old ?? 1});
+      }
+    };
+    actions.append(expand);
+  }
+  toolbar.append(options, actions);
+  const code = el('div', 'code'); code.tabIndex = 0;
+  code.setAttribute('role', 'region'); code.setAttribute('aria-label', 'Code changes in ' + file.path);
+  const update = () => {
+    for (const [button, view] of buttons) button.setAttribute('aria-pressed', String(codePreferences.view === view));
+    wrap.setAttribute('aria-pressed', String(codePreferences.wrap));
+    size.textContent = codePreferences.size + 'px';
+    smaller.disabled = codePreferences.size === 11; larger.disabled = codePreferences.size === 18;
+    paintCode(code, rows);
+  };
+  codeViews.set(box, update); update();
+  box.append(header, toolbar, code);
   return box;
 }
+
 function render() {
   if (!state?.repositories.length) return;
   if (!selectedRepository) selectedRepository = state.repositories.length > 1 ? SYSTEM : state.repositories[0].id;
@@ -319,7 +433,7 @@ $('refresh').onclick = async () => {
 $('close').onclick = async () => {
   try {
     await api('close', {}); closePreview(); ended = true; clearInterval(poll); state = null; signature = ''; diagramFrames = []; diagramSignature = '';
-    document.body.replaceChildren(el('p', '', 'Session ended. Review data has been removed from the running application.'));
+    document.body.replaceChildren(el('p', '', 'Session ended. Review data is saved locally. Reopen the same repositories to continue.'));
   } catch (error) { $('error').textContent = error.message; }
 };
 function heartbeat() { return api('heartbeat', {clientId}).catch(() => {}); }

@@ -1,6 +1,6 @@
 ---
 name: kneeboard
-description: Present AI code changes in a temporary local Kneeboard report with verified code evidence, review priorities, and a change diagram. Use when asked to review or explain repository changes with Kneeboard.
+description: Present AI code changes in a persistent local Kneeboard report with verified code evidence, review priorities, and a change diagram. Use when asked to review or explain repository changes with Kneeboard.
 ---
 
 Use the installed `kneeboard` CLI and its fixed interface. Do not generate a replacement HTML report.
@@ -74,3 +74,5 @@ Submitting a system overview checks every repository for changes. If any changed
 Priorities: P0 blocks use broadly; P1 urgent correctness/security issue; P2 normal fix; P3 minor improvement. Each finding needs at least one exact code reference. Evidence is verified for line accuracy, not for the truth of the reasoning. Diagram relationships are AI explanations, not automatically verified dependencies.
 
 If submission says the repository changed, refresh via POST `<session-url>refresh` with `{"repositoryId":"the repository id"}`, fetch that repository's new snapshot, and reassess. Refreshing one repository clears its report and invalidates the system overview, while other repository reports remain available. Switching the UI selector does not refresh snapshots, change the API target, or erase other repository reports. Never just replace the ID on an old review. Omitted binary/large files and symlinks cannot support code evidence; disclose coverage gaps in the summary. The UI polls for updates. Reloading the page or closing a temporary inspection tab must not end the user's review. Only the user decides when to end the session. Browser disconnects have a 30-second reconnection grace; other live tabs and active AI leases preserve the session. Without tabs or AI leases, missing browser heartbeats expire it after the configured idle timeout (120 seconds by default). Review leases expire after 30 minutes without renewal and store no data on disk.
+
+Snapshots, reports, system overviews, and diagram sources are saved locally and restored when the same repositories and base reopen. Ending the server preserves saved data. Refresh clears the affected saved reports; use refresh-all only when the user requests clearing all reports and recapturing every snapshot.

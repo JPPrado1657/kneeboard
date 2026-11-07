@@ -4,12 +4,18 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.request
 import urllib.error
 from kneeboard.app import collect, validate_report, Session, Handler, LocalServer
 
 class ReviewTests(unittest.TestCase):
     def setUp(self):
+        state_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(state_temp.cleanup)
+        state_env = patch.dict('os.environ', {'KNEEBOARD_STATE_DIR': state_temp.name})
+        state_env.start()
+        self.addCleanup(state_env.stop)
         self.tmp=tempfile.TemporaryDirectory(); self.repo=Path(self.tmp.name)
         self.git('init');self.git('config','user.email','test@example.com');self.git('config','user.name','Test')
         (self.repo/'a.txt').write_text('before\n');self.git('add','.');self.git('commit','-m','initial')

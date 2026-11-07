@@ -15,6 +15,11 @@ from kneeboard.app import Handler, LocalServer, Session
 
 class MultiRepositoryTests(unittest.TestCase):
     def setUp(self):
+        state_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(state_temp.cleanup)
+        state_env = patch.dict('os.environ', {'KNEEBOARD_STATE_DIR': state_temp.name})
+        state_env.start()
+        self.addCleanup(state_env.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -111,8 +116,25 @@ class MultiRepositoryTests(unittest.TestCase):
             state = self.request(url)
             self.assertEqual(len(state['repositories']), 2)
             self.assertEqual(set(state['overview']['snapshotIds']), {repo['id'] for repo in state['repositories']})
+            self.request(url, 'overview', self.overview())
             self.request(url, 'close', {})
             self.assertEqual(process.wait(timeout=5), 0)
+            reopened = subprocess.Popen([sys.executable, '-u', '-m', 'kneeboard.app', 'serve',
+                                         *map(str, self.paths), '--no-open'],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                restarted_url = reopened.stdout.readline().strip()
+                restored = self.request(restarted_url)
+                self.assertEqual(restored['overview']['report']['title'], 'System review')
+                self.assertEqual(restored['repositories'], state['repositories'])
+                self.request(restarted_url, 'close', {})
+                self.assertEqual(reopened.wait(timeout=5), 0)
+            finally:
+                if reopened.poll() is None:
+                    reopened.terminate()
+                    reopened.wait(timeout=5)
+                reopened.stdout.close()
+                reopened.stderr.close()
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -288,6 +310,53 @@ class MultiRepositoryTests(unittest.TestCase):
         self.assertIn('exact quote do not match', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
         self.assertEqual(len(self.request(url)['repositories']), 2)
+
+    def test_saved_reviews_survive_shutdown_edits_and_reordered_repositories(self):
+        for repo in self.session.repositories:
+            self.session.submit(self.report(repo))
+        overview = self.overview()
+        overview['diagrams'] = [dict(title='Flow', format='mermaid', source='graph LR; A-->B')]
+        self.session.submit_overview(overview)
+        expected = json.loads(json.dumps(self.session.state()))
+        token = self.session.token
+        self.session.clear()  # Server shutdown releases only the in-memory copy.
+        (self.paths[0] / 'shared.txt').write_text('interface changed\n')
+        restored = Session(list(reversed(self.paths)), 'HEAD')
+        self.assertEqual(restored.overview_report, expected['overview']['report'])
+        self.assertEqual(restored.repositories, list(reversed(expected['repositories'])))
+        self.assertNotEqual(restored.token, token)
+        self.assertEqual(restored.clients, {})
+        self.assertEqual(restored.review_leases, {})
+        with self.assertRaisesRegex(ValueError, 'Repository changed'):
+            restored.submit(restored.repositories[1]['report'])
+        restored.refresh_all()
+        reopened = Session(self.paths, 'HEAD')
+        self.assertIsNone(reopened.overview_report)
+        self.assertTrue(all(repo['report'] is None for repo in reopened.repositories))
+        self.assertIn('interface changed', reopened.repositories[0]['snapshot']['files'][0]['new'])
+
+    def test_refresh_one_is_persisted_without_erasing_other_review(self):
+        first, second = self.session.repositories
+        for repo in (first, second):
+            self.session.submit(self.report(repo))
+        self.session.submit_overview(self.overview())
+        self.session.refresh(first['id'])
+        restored = Session(self.paths, 'HEAD')
+        self.assertIsNone(restored.overview_report)
+        self.assertIsNone(restored.repositories[0]['report'])
+        self.assertEqual(restored.repositories[1]['report'], second['report'])
+        self.assertEqual(self.session.state_path.stat().st_mode & 0o777, 0o600)
+        saved = json.loads(self.session.state_path.read_text())
+        self.assertNotIn('token', saved)
+        self.assertNotIn('review_leases', saved)
+        self.assertIsNone(Session([self.paths[0]], 'HEAD').report)
+        self.assertIsNone(Session(self.paths, 'HEAD~0').report)
+
+    def test_corrupt_save_is_reported_and_preserved(self):
+        self.session.state_path.write_text('{broken')
+        with self.assertRaisesRegex(ValueError, 'Could not restore saved session'):
+            Session(self.paths, 'HEAD')
+        self.assertEqual(self.session.state_path.read_text(), '{broken')
 
     def test_clear_releases_all_repository_review_data(self):
         references = list(self.session.repositories)

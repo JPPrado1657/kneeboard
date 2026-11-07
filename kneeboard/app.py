@@ -6,6 +6,7 @@ from pathlib import Path
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -182,7 +183,7 @@ def validate_overview(report, repositories):
     return report
 
 class Session:
-    def __init__(self, repos, base):
+    def __init__(self, repos, base, state_dir=None):
         if isinstance(repos, (str, os.PathLike)):
             repos = [repos]
         self.base = base
@@ -193,18 +194,62 @@ class Session:
             if root in roots:
                 raise ValueError('Repository specified more than once: ' + str(root))
             roots.add(root)
-            snapshot = collect(root, base)
-            self.repositories.append(dict(id=snapshot['repositoryId'], name=root.name,
-                                          path=str(root), snapshot=snapshot, report=None))
+            self.repositories.append(dict(path=str(root)))
         if not self.repositories:
             raise ValueError('Specify at least one repository')
+        identity = {'paths': sorted(str(root) for root in roots), 'base': base}
+        key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        directory = Path(state_dir or os.environ.get('KNEEBOARD_STATE_DIR') or
+                         Path.home() / '.local' / 'share' / 'kneeboard')
+        self.state_path = directory / (key + '.json')
         self.overview_report = None
+        if self.state_path.exists():
+            try:
+                saved = json.loads(self.state_path.read_text())
+                if saved['version'] != 1 or saved['identity'] != identity:
+                    raise ValueError('Incompatible saved session')
+                by_path = {repo['path']: repo for repo in saved['repositories']}
+                restored = [by_path[repo['path']] for repo in self.repositories]
+                for repo in restored:
+                    if not isinstance(repo['snapshot']['files'], list):
+                        raise ValueError('Invalid saved snapshot')
+                    if repo['report'] is not None:
+                        validate_report(repo['report'], repo['snapshot'])
+                overview = saved['overview_report']
+                if overview is not None:
+                    validate_overview(overview, restored)
+                self.repositories = restored
+                self.overview_report = overview
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ValueError(f'Could not restore saved session at {self.state_path}: {exc}') from exc
+        else:
+            for repo in self.repositories:
+                root = Path(repo['path'])
+                snapshot = collect(root, base)
+                repo.update(id=snapshot['repositoryId'], name=root.name, snapshot=snapshot, report=None)
+        self.identity = identity
+        self.save()
         self.token = secrets.token_urlsafe(32)
         self.last_seen = time.monotonic()
         self.clients = {}
         self.review_leases = {}
         self.disconnect_deadline = None
         self.lock = threading.RLock()
+
+    def save(self):
+        """Replace the saved review atomically; runtime credentials stay in memory."""
+        self.state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data = {'version': 1, 'identity': self.identity, 'repositories': self.repositories,
+                'overview_report': self.overview_report}
+        descriptor, temporary = tempfile.mkstemp(prefix='.session-', dir=self.state_path.parent)
+        try:
+            with os.fdopen(descriptor, 'w') as stream:
+                json.dump(data, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.state_path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
     def heartbeat(self, client_id=None):
         now = time.monotonic()
@@ -280,6 +325,7 @@ class Session:
         repo['snapshot'] = collect(repo['path'], self.base)
         repo['report'] = None
         self.overview_report = None
+        self.save()
 
     def snapshot_ids(self):
         return {repo['id']: repo['snapshot']['id'] for repo in self.repositories}
@@ -289,12 +335,14 @@ class Session:
         for repo, snapshot in zip(self.repositories, snapshots):
             repo.update(snapshot=snapshot, report=None)
         self.overview_report = None
+        self.save()
 
     def submit_overview(self, report):
         for repo in self.repositories:
             if collect(repo['path'], self.base)['id'] != repo['snapshot']['id']:
                 raise ValueError('Repository changed; refresh and review again: ' + repo['name'])
         self.overview_report = validate_overview(report, self.repositories)
+        self.save()
 
     def submit(self, report):
         if not isinstance(report, dict):
@@ -303,6 +351,7 @@ class Session:
         if collect(repo['path'], self.base)['id'] != repo['snapshot']['id']:
             raise ValueError('Repository changed; refresh and review again')
         repo['report'] = validate_report(report, repo['snapshot'])
+        self.save()
 
     def clear(self):
         for repo in self.repositories:
@@ -414,6 +463,8 @@ class Handler(BaseHTTPRequestHandler):
     def safe_dispatch(self):
         try:
             self.dispatch()
+        except OSError:
+            self.respond(500, {'error': 'Could not save review data; check local storage permissions and space'})
         except (ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as exc:
             self.respond(400, {'error': str(exc)})
 
